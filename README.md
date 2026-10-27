@@ -11,7 +11,7 @@ Abra o **PowerShell como administrador** (menu Iniciar → digite *PowerShell* �
 irm https://raw.githubusercontent.com/jefersonrte/qrwap-instalador/main/instalar.ps1 | iex
 ```
 
-O instalador:
+O instalador (a pasta `C:\QRWAP` fica liberada só para administradores e o pacote baixado é conferido pelo **SHA-256** publicado na release):
 1. confere o computador (Windows 10/11, virtualização ligada, espaço em disco, memória);
 2. **instala o Docker Desktop** se não houver (pede o seu OK por causa da licença da Docker);
 3. baixa a **última versão** daqui (aba *Releases*) e instala em `C:\QRWAP`;
@@ -23,7 +23,7 @@ Para **atualizar**, rode o mesmo comando (ou `C:\QRWAP\ATUALIZAR.bat`): ele guar
 ## Primeiro acesso
 
 - Endereço: `http://localhost:8080` (o painel só atende este computador)
-- E-mail: `admin@qrwap.local` — senha inicial: `Qrwap@2026`
+- E-mail: `admin@qrwap.local` — a **senha inicial é aleatória** e o instalador a mostra uma vez no fim (anote). Ela também fica em `C:\QRWAP\app\ACESSO\ACESSO.txt` até ser trocada.
 - O sistema **obriga a trocar a senha** no primeiro acesso, antes de abrir qualquer tela.
 - Depois: *Administração → WhatsApp → Conectar e gerar QR Code* e leia com o celular (WhatsApp → Aparelhos conectados).
 
@@ -37,3 +37,7 @@ Para **atualizar**, rode o mesmo comando (ou `C:\QRWAP\ATUALIZAR.bat`): ele guar
 - Desinstalar: `C:\QRWAP\DESINSTALAR.bat` (remove também o banco e a conexão do WhatsApp).
 
 Repositório com chave (se você mantiver uma cópia privada): antes do comando, `$env:QRWAP_TOKEN = '<chave do GitHub>'` e `$env:QRWAP_REPO = 'dono/repo'`.
+
+## Documentação
+
+Manual do usuário, guia do administrador, segurança, LGPD e modelos jurídicos: pasta `documentacao/` do pacote (também em `C:\QRWAP\app\documentacao` depois de instalar). O sistema tem uma página pública de **aviso de privacidade** em `/privacidade.php`.

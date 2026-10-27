@@ -32,10 +32,21 @@ $Repo      = if ($env:QRWAP_REPO)  { $env:QRWAP_REPO }  else { 'jefersonrte/qrwa
 $Pasta     = if ($env:QRWAP_PASTA) { $env:QRWAP_PASTA.TrimEnd('\') } else { 'C:\QRWAP' }
 $PortaPedida = if ($env:QRWAP_PORTA) { [int]$env:QRWAP_PORTA } else { 0 }
 $UrlScript = "https://raw.githubusercontent.com/$Repo/main/instalar.ps1"
-$SenhaInicial = 'Qrwap@2026'                       # senha genérica do primeiro acesso: o sistema obriga a trocar ao entrar
 $App       = Join-Path $Pasta 'app'
 $Backups   = Join-Path $Pasta 'backups'
 $Log       = Join-Path $Pasta 'instalacao.log'
+
+# Texto aleatório de verdade (gerador criptográfico do Windows), sem caracteres que se confundem (0/O, 1/l/I)
+function Aleatorio([int]$tamanho, [string]$alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789') {
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $saida = New-Object System.Text.StringBuilder
+    $b = New-Object byte[] 1
+    while ($saida.Length -lt $tamanho) {
+        $rng.GetBytes($b)
+        if ($b[0] -lt (256 - (256 % $alfabeto.Length))) { [void]$saida.Append($alfabeto[$b[0] % $alfabeto.Length]) }   # sem viés
+    }
+    return $saida.ToString()
+}
 
 function Linha($texto, $cor = 'Gray') { Write-Host $texto -ForegroundColor $cor }
 function Titulo($texto) { Write-Host ''; Write-Host "==> $texto" -ForegroundColor Cyan }
@@ -56,24 +67,28 @@ function Cabecalhos {
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
     Linha 'O instalador precisa de permissão de administrador (para instalar o Docker). Vou pedir a autorização do Windows...' Yellow
-    $temp = Join-Path $env:TEMP 'qrwap-instalar.ps1'
-    # as opções vão no começo do arquivo: o processo elevado não herda as variáveis desta janela
+    # Nada é gravado numa pasta comum para depois rodar elevado (outro programa do mesmo usuário poderia trocar o arquivo no
+    # meio): o processo elevado recebe o comando na linha de comando e busca o instalador sozinho. As opções vão junto.
     $prelude = ''
     foreach ($n in 'QRWAP_PASTA', 'QRWAP_PORTA', 'QRWAP_REPO', 'QRWAP_TOKEN', 'QRWAP_ACEITO', 'QRWAP_ORIGEM', 'QRWAP_AUTOATUALIZAR', 'QRWAP_PROJETO', 'QRWAP_SEMPRE_LIGADO') {
         $v = [Environment]::GetEnvironmentVariable($n)
-        if ($v) { $prelude += "`$env:$n = '" + $v.Replace("'", "''") + "'`r`n" }
+        if ($v) { $prelude += "`$env:$n = '" + $v.Replace("'", "''") + "'; " }
     }
     if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
-        $corpo = Get-Content $PSCommandPath -Raw
+        $corpo = "& '" + $PSCommandPath.Replace("'", "''") + "'"          # rodando de um arquivo local (testes): o mesmo arquivo
     } else {
-        $corpo = (Invoke-WebRequest -UseBasicParsing -Headers (Cabecalhos) -Uri $UrlScript).Content
+        $auth = if ($env:QRWAP_TOKEN) { "-Headers @{ Authorization = 'Bearer " + $env:QRWAP_TOKEN.Replace("'", "''") + "' } " } else { '' }
+        $corpo = "irm $auth'$UrlScript' | iex"
     }
-    Set-Content -Path $temp -Value ($prelude + $corpo) -Encoding UTF8
-    Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$temp`""
+    $comando = ($prelude + $corpo).Replace('"', '\"')
+    Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`"$comando`""
     return
 }
 
 New-Item -ItemType Directory -Force -Path $Pasta, $Backups | Out-Null
+# A pasta guarda a senha do banco, o acesso inicial, as cópias do banco (todas as conversas) e os scripts que rodam como
+# administrador: só administradores e o próprio sistema entram. Sem isto ela herdaria a permissão de escrita de "Usuários".
+& icacls.exe $Pasta /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' 2>&1 | Out-Null
 try { Start-Transcript -Path $Log -Append | Out-Null } catch { }
 
 try {
@@ -185,6 +200,14 @@ try {
             if ($asset) { $h['Accept'] = 'application/octet-stream'; $url = $asset.url } else { $url = $rel.zipball_url }
             Linha '    Baixando...' DarkGray
             Invoke-WebRequest -UseBasicParsing -Headers $h -Uri $url -OutFile $zip
+            # confere o pacote contra o SHA-256 publicado junto com a versão: arquivo corrompido ou trocado no caminho é recusado
+            $selo = $rel.assets | Where-Object { $_.name -like 'qrwap-*.zip.sha256' } | Select-Object -First 1
+            if (-not $selo) { Remove-Item $zip -Force -ErrorAction SilentlyContinue; Falhar "Esta versão não traz o arquivo de verificação (.sha256): por segurança não instalo. Avise o fornecedor." }
+            $hs = Cabecalhos; $hs['Accept'] = 'application/octet-stream'
+            $esperado = ((Invoke-WebRequest -UseBasicParsing -Headers $hs -Uri $selo.url).Content | ForEach-Object { if ($_ -is [byte[]]) { [Text.Encoding]::ASCII.GetString($_) } else { [string]$_ } }).Trim().Split(' ')[0].ToLower()
+            $obtido = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+            if ($esperado -ne $obtido) { Remove-Item $zip -Force -ErrorAction SilentlyContinue; Falhar "O pacote baixado não confere com o SHA-256 publicado (esperado $esperado, obtido $obtido). Não instalei nada." }
+            Ok 'pacote conferido (SHA-256)'
         }
     }
 
@@ -202,7 +225,20 @@ try {
             Get-ChildItem $Backups -Filter 'qrwap-banco-*.sql' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force -ErrorAction SilentlyContinue
         }
         $tmp = Join-Path $env:TEMP ('qrwap-extrair-' + [guid]::NewGuid().ToString('N'))
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        # extração própria: recusa entrada que tente sair da pasta de destino (zip-slip)
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $destino = [IO.Path]::GetFullPath($tmp).TrimEnd('\') + '\'
+        $arq = [IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            foreach ($e in $arq.Entries) {
+                $alvo = [IO.Path]::GetFullPath((Join-Path $tmp $e.FullName))
+                if (-not $alvo.StartsWith($destino, [StringComparison]::OrdinalIgnoreCase)) { Falhar "O pacote tem um caminho suspeito ($($e.FullName)). Não instalei nada." }
+                if ($e.FullName.EndsWith('/')) { New-Item -ItemType Directory -Force -Path $alvo | Out-Null; continue }
+                New-Item -ItemType Directory -Force -Path (Split-Path $alvo) | Out-Null
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $alvo, $true)
+            }
+        } finally { $arq.Dispose() }
         Remove-Item $zip -Force -ErrorAction SilentlyContinue
         $raiz = Get-ChildItem $tmp | Where-Object { Test-Path (Join-Path $_.FullName 'docker-compose.yml') } | Select-Object -First 1
         if (-not $raiz) { $raiz = Get-Item $tmp }
@@ -220,7 +256,7 @@ try {
     $envArq = Join-Path $App '.env'
     $conf = @{}
     if (Test-Path $envArq) { foreach ($l in Get-Content $envArq) { if ($l -match '^([A-Z_]+)=(.*)$') { $conf[$Matches[1]] = $Matches[2] } } }
-    if (-not $conf['DB_SENHA']) { $conf['DB_SENHA'] = -join ((48..57) + (97..122) | Get-Random -Count 28 | ForEach-Object { [char]$_ }) }
+    if (-not $conf['DB_SENHA']) { $conf['DB_SENHA'] = Aleatorio 32 'abcdefghijkmnpqrstuvwxyz23456789' }
     function PortaLivre([int]$p) { -not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue) }
     $porta = if ($PortaPedida) { $PortaPedida } elseif ($conf['PORTA']) { [int]$conf['PORTA'] } else { 8080 }
     # só procura outra porta quando ela é nova (instalação nova ou porta diferente da guardada): a guardada é do próprio
@@ -230,7 +266,13 @@ try {
     }
     $conf['PORTA'] = [string]$porta
     if ($env:QRWAP_PROJETO) { $conf['COMPOSE_PROJECT_NAME'] = $env:QRWAP_PROJETO }
-    if (-not $conf['ADMIN_SENHA_INICIAL']) { $conf['ADMIN_SENHA_INICIAL'] = $SenhaInicial }
+    # senha do primeiro acesso: diferente em cada instalação (nunca uma senha conhecida), mostrada uma vez no fim e guardada em
+    # ACESSO\ACESSO.txt só até ser trocada; o sistema obriga a trocá-la ao entrar
+    $senhaNova = $false
+    if (-not $conf['ADMIN_SENHA_INICIAL']) {
+        $conf['ADMIN_SENHA_INICIAL'] = (Aleatorio 6) + '-' + (Aleatorio 6) + '-' + (Aleatorio 6)
+        $senhaNova = $true
+    }
     ($conf.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`r`n" | Set-Content -Path $envArq -Encoding ASCII
     Ok "painel em http://localhost:$porta"
 
@@ -323,7 +365,7 @@ docker compose up -d *> '$Pasta\iniciar.log'
     $acaoIni = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$iniciar`""
     $gatilho = New-ScheduledTaskTrigger -AtLogOn
     $gatilho.Delay = 'PT30S'
-    $princ = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+    $princ = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-544' -RunLevel Highest      # a pasta é só de administradores
     Register-ScheduledTask -TaskName 'QRWAP Iniciar' -Action $acaoIni -Trigger $gatilho -Principal $princ -Force | Out-Null
     Ok 'tarefa "QRWAP Iniciar": ao entrar no Windows, garante que o sistema está no ar'
     # (c) o computador não deve dormir com o sistema atendendo (só na tomada); pergunta, a menos que já esteja decidido
@@ -346,10 +388,15 @@ docker compose up -d *> '$Pasta\iniciar.log'
     Linha '  PRONTO!' Green
     Linha "  Painel:  http://localhost:$porta/" White
     Linha '  E-mail:  admin@qrwap.local' White
-    Linha "  Senha inicial:  $($conf['ADMIN_SENHA_INICIAL'])   (o sistema pede para trocar no primeiro acesso)" White
+    # a senha inicial NÃO vai para o registro (instalacao.log): o registro é encerrado antes de ela aparecer na tela
+    try { Stop-Transcript | Out-Null } catch { }
+    if ($senhaNova) {
+        Linha "  Senha inicial:  $($conf['ADMIN_SENHA_INICIAL'])   (anote; o sistema pede para trocar no primeiro acesso)" White
+    } else {
+        Linha '  Senha: a que você já definiu (se ainda for a inicial, está em ACESSO\ACESSO.txt).' White
+    }
     Linha '  Depois: Administração > WhatsApp > Conectar e gerar QR Code, e leia com o celular.' DarkGray
     Linha '  Para atualizar no futuro: rode o mesmo comando (ou ATUALIZAR.bat).' DarkGray
-    if (Test-Path $acessoTxt) { Start-Process notepad.exe $acessoTxt }
     Start-Process "http://localhost:$porta/"
 } catch {
     Write-Host ''
